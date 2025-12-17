@@ -1,0 +1,18 @@
+<section class="mb-10 max-w-2xl mx-auto text-center">
+    <h2 class="text-3xl font-extrabold mb-4 text-gray-800">Deteksi Banjir Seluruh Indonesia</h2>
+    <p class="text-gray-600 mb-8">Analisis risiko banjir real-time menggunakan AI Generatif.</p>
+    
+    <form action="/analyze" method="POST" onsubmit="document.getElementById('loading-state').classList.remove('hidden');">
+        <div class="relative flex items-center shadow-2xl rounded-full bg-white p-2 border border-gray-100 focus-within:ring-4 ring-blue-100 transition-all">
+            <div class="pl-4 text-gray-400">
+                <i data-lucide="search"></i>
+            </div>
+            <input type="text" name="location" required value="<%= location %>"
+                placeholder="Masukkan Kota/Daerah (Contoh: Bandung, Jakarta...)"
+                class="w-full px-4 py-3 bg-transparent outline-none text-lg text-gray-800 placeholder-gray-400 font-medium">
+            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-full font-bold shadow-md transition-all">
+                Analisis
+            </button>
+        </div>
+    </form>
+</section>

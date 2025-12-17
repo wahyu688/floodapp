@@ -1,0 +1,18 @@
+<div id="risk-gauge" 
+     data-level="<%= data.riskLevel %>" 
+     data-prob="<%= data.probability %>"
+     class="p-6 rounded-2xl bg-gray-50 border border-gray-200 border-opacity-50 shadow-sm flex flex-col items-center justify-center text-center transition-colors duration-500">
+    
+    <h3 class="text-gray-600 font-medium mb-2 uppercase tracking-wide text-sm">Status Risiko</h3>
+    
+    <div id="gauge-text" class="text-4xl font-extrabold mb-2 text-gray-700">
+        <%= data.riskLevel %>
+    </div>
+    
+    <div class="w-full bg-gray-200 rounded-full h-4 mb-2 overflow-hidden">
+        <div id="gauge-bar" class="h-4 rounded-full transition-all duration-1000 bg-gray-400" style="width: 0%"></div>
+    </div>
+    
+    <p class="text-sm text-gray-500">Probabilitas: <span class="font-bold"><%= data.probability %>%</span></p>
+    <p class="text-xs text-gray-400 mt-2">Model: AI Simulated (Gemini Pro)</p>
+</div>
