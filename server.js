@@ -13,7 +13,6 @@ app.use(express.static('public'));
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// --- KAMUS KODE CUACA BMKG ---
 const KODE_CUACA_BMKG = {
     "0": "Cerah", "1": "Cerah Berawan", "2": "Cerah Berawan", "3": "Berawan", "4": "Berawan Tebal",
     "5": "Udara Kabur", "10": "Asap", "45": "Kabut", 
@@ -21,24 +20,19 @@ const KODE_CUACA_BMKG = {
     "80": "Hujan Lokal", "95": "Hujan Petir", "97": "Hujan Petir Kuat"
 };
 
-// --- FUNGSI 1: Cari Koordinat ---
 async function getCoordinates(locationName) {
     try {
         const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(locationName)}&count=1&language=id&format=json`;
         const response = await axios.get(url);
         if (!response.data.results || response.data.results.length === 0) throw new Error("Lokasi tidak ditemukan.");
         return response.data.results[0];
-    } catch (error) {
-        throw error;
-    }
+    } catch (error) { throw error; }
 }
 
-// --- FUNGSI 2: Ambil Data BMKG ---
 async function getBMKGData(provinceName, cityName) {
     try {
         let xmlFile = "DigitalForecast-Indonesia.xml"; 
         const p = provinceName.toLowerCase();
-        
         if (p.includes('jakarta')) xmlFile = "DigitalForecast-DKIJakarta.xml";
         else if (p.includes('jawa barat')) xmlFile = "DigitalForecast-JawaBarat.xml";
         else if (p.includes('jawa tengah')) xmlFile = "DigitalForecast-JawaTengah.xml";
@@ -51,10 +45,7 @@ async function getBMKGData(provinceName, cityName) {
         const url = `https://data.bmkg.go.id/DataMKG/MEWS/DigitalForecast/${xmlFile}`;
         const response = await axios.get(url, { timeout: 5000 });
         
-        if (!response.data || typeof response.data !== 'string' || !response.data.includes('<?xml')) {
-            console.warn("Data BMKG korup atau bukan XML. Skip.");
-            return null;
-        }
+        if (!response.data || typeof response.data !== 'string' || !response.data.includes('<?xml')) return null;
 
         const parser = new xml2js.Parser();
         const result = await parser.parseStringPromise(response.data);
@@ -67,7 +58,6 @@ async function getBMKGData(provinceName, cityName) {
         if (bestMatch) {
             const params = bestMatch.parameter;
             const weatherParam = params.find(p => p.$.id === "weather");
-            
             if (weatherParam && weatherParam.timerange && weatherParam.timerange.length > 0) {
                 const weatherCode = weatherParam.timerange[0].value[0]._;
                 return {
@@ -80,12 +70,11 @@ async function getBMKGData(provinceName, cityName) {
         }
         return null;
     } catch (error) {
-        console.error("Gagal ambil data BMKG (Lanjut pakai satelit):", error.message);
+        console.error("BMKG Skip:", error.message);
         return null; 
     }
 }
 
-// --- FUNGSI 3: Ambil Data Grafik ---
 async function getChartData(lat, lon, bmkgCode) {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=precipitation&hourly=precipitation&timezone=Asia%2FJakarta&past_days=1&forecast_days=1`;
     const response = await axios.get(url);
@@ -118,11 +107,9 @@ async function getChartData(lat, lon, bmkgCode) {
             if (index >= 3) p.rainfall_mm = parseFloat((Math.random() * 2 + 1).toFixed(1)); 
         });
     }
-
     return chartPoints;
 }
 
-// --- FUNGSI UTAMA ---
 async function analyzeFloodRisk(locationInput) {
     const geo = await getCoordinates(locationInput);
     const bmkgData = await getBMKGData(geo.admin1 || "", geo.name);
@@ -132,14 +119,14 @@ async function analyzeFloodRisk(locationInput) {
     
     chartData.forEach(d => { d.water_level_cm = 50 + (d.rainfall_mm * 15); });
 
-    // --- PERBAIKAN DI SINI: GUNAKAN NAMA LENGKAP (-001) ---
-    // 'gemini-1.5-flash-001' adalah versi stabil yang pasti ada
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-001" });
+    // --- PERUBAHAN DISINI: MODEL 2.0 FLASH LITE ---
+    // Model ini ada di daftar akses kamu dan biasanya lebih hemat kuota
+    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite-preview-02-05" });
     
     const prompt = `
     Analisis risiko banjir lokasi: ${geo.name}.
     Data: BMKG=${bmkgData ? bmkgData.status : "N/A"}, Hujan 6Jam=${totalRain.toFixed(1)}mm.
-    Jika BMKG Hujan/Hujan>0.5mm -> STATUS WASPADA/BAHAYA.
+    Jika BMKG Hujan atau Hujan > 0.5mm -> STATUS = WASPADA/BAHAYA.
     Output JSON valid.
     
     Format JSON:
@@ -152,7 +139,7 @@ async function analyzeFloodRisk(locationInput) {
       "recommendation": "string",
       "sensorData": [], 
       "forecasts": [
-        { "period": "Hari Ini", "riskLevel": "AUTO", "probability": 0, "reasoning": "Data BMKG" },
+        { "period": "Hari Ini", "riskLevel": "AUTO", "probability": 0, "reasoning": "BMKG/Satelit" },
         { "period": "Besok", "riskLevel": "AUTO", "probability": 0, "reasoning": "Prediksi" },
         { "period": "Lusa", "riskLevel": "AUTO", "probability": 0, "reasoning": "Prediksi" }
       ]
@@ -187,8 +174,8 @@ app.post('/analyze', async (req, res) => {
     } catch (error) {
         console.error("SERVER ERROR:", error);
         let errorMsg = error.message || "Terjadi kesalahan server.";
-        if (errorMsg.includes("404")) errorMsg = "Model AI tidak ditemukan. Coba update nama model.";
-        if (errorMsg.includes("429")) errorMsg = "Server AI sibuk (Limit Kuota). Tunggu sebentar.";
+        if (errorMsg.includes("404")) errorMsg = "Model AI tidak ditemukan di akun ini.";
+        if (errorMsg.includes("429")) errorMsg = "Server AI sedang penuh (Limit). Coba 1 menit lagi.";
         
         res.render('index', { data: null, error: "Gagal: " + errorMsg, location: location });
     }
