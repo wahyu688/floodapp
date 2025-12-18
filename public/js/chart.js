@@ -1,49 +1,42 @@
 document.addEventListener('DOMContentLoaded', function() {
     const ctx = document.getElementById('floodChart');
-    
-    // Cek jika elemen canvas ada
     if (!ctx) return;
 
-    // Ambil data dari atribut data-json di HTML
     const rawData = JSON.parse(ctx.dataset.json || '[]');
-
-    // Jika data kosong, jangan render error, biarkan kosong atau default
     if (rawData.length === 0) return;
 
-    // Siapkan Label (Jam)
     const labels = rawData.map(d => d.timestamp);
-    
-    // Siapkan Data
     const rainData = rawData.map(d => d.rainfall_mm);
     const waterData = rawData.map(d => d.water_level_cm);
 
     new Chart(ctx, {
-        type: 'bar', // Kita pakai Bar sebagai dasar agar hujan terlihat batang
+        type: 'bar',
         data: {
             labels: labels,
             datasets: [
                 {
                     label: 'Curah Hujan (mm)',
                     data: rainData,
-                    backgroundColor: 'rgba(59, 130, 246, 0.7)', // Biru Solid
+                    backgroundColor: 'rgba(59, 130, 246, 0.7)',
                     borderColor: '#3b82f6',
                     borderWidth: 1,
-                    yAxisID: 'y-hujan', // TERHUBUNG KE SUMBU KIRI
-                    type: 'bar', // Hujan bentuknya BATANG
-                    order: 2
+                    yAxisID: 'y-hujan',
+                    type: 'bar',
+                    order: 2,
+                    barPercentage: 0.6 // Bikin batang lebih gemuk sedikit
                 },
                 {
                     label: 'Tinggi Air (cm)',
                     data: waterData,
-                    borderColor: '#ef4444', // Merah
+                    borderColor: '#ef4444',
                     backgroundColor: 'rgba(239, 68, 68, 0.1)',
                     borderWidth: 3,
                     pointRadius: 4,
                     pointBackgroundColor: '#fff',
                     pointBorderColor: '#ef4444',
-                    yAxisID: 'y-air', // TERHUBUNG KE SUMBU KANAN
-                    type: 'line', // Air bentuknya GARIS
-                    tension: 0.4, // Garis melengkung halus
+                    yAxisID: 'y-air',
+                    type: 'line',
+                    tension: 0.4,
                     fill: true,
                     order: 1
                 }
@@ -57,19 +50,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 intersect: false,
             },
             plugins: {
-                legend: {
-                    position: 'top',
-                },
+                legend: { position: 'top' },
                 tooltip: {
                     callbacks: {
                         label: function(context) {
                             let label = context.dataset.label || '';
-                            if (label) {
-                                label += ': ';
-                            }
+                            if (label) label += ': ';
                             if (context.parsed.y !== null) {
                                 label += context.parsed.y;
-                                // Tambahkan satuan di tooltip
                                 if(context.dataset.yAxisID === 'y-hujan') label += ' mm';
                                 else label += ' cm';
                             }
@@ -79,13 +67,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             },
             scales: {
-                // KONFIGURASI SUMBU X
-                x: {
-                    grid: {
-                        display: false
-                    }
-                },
-                // KONFIGURASI SUMBU KIRI (HUJAN)
+                x: { grid: { display: false } },
+                // --- PENGATURAN SKALA HUJAN (KIRI) ---
                 'y-hujan': {
                     type: 'linear',
                     display: true,
@@ -97,12 +80,13 @@ document.addEventListener('DOMContentLoaded', function() {
                         font: { weight: 'bold' }
                     },
                     min: 0,
-                    suggestedMax: 20, // Skala max default agar hujan kecil tetap kelihatan
-                    grid: {
-                        display: false // Hilangkan grid agar tidak pusing
-                    }
+                    // REVISI: Ganti suggestedMax dari 20 jadi 1.0 saja
+                    // Ini membuat hujan 0.2mm akan terlihat setinggi 20% grafik (Jelas terlihat)
+                    // Jika hujan deras (>1mm), grafik akan otomatis menyesuaikan (naik sendiri)
+                    suggestedMax: 1.0, 
+                    grid: { display: false }
                 },
-                // KONFIGURASI SUMBU KANAN (AIR)
+                // --- PENGATURAN SKALA AIR (KANAN) ---
                 'y-air': {
                     type: 'linear',
                     display: true,
@@ -113,9 +97,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         color: '#ef4444',
                         font: { weight: 'bold' }
                     },
-                    grid: {
-                        drawOnChartArea: true // Grid utama ikut sumbu air saja
-                    }
+                    min: 0,
+                    suggestedMax: 100, // Skala air tetap besar
+                    grid: { drawOnChartArea: true }
                 }
             }
         }
