@@ -5,7 +5,6 @@ const xml2js = require('xml2js');
 require('dotenv').config();
 
 const app = express();
-// Gunakan port dari environment variable (penting untuk Dokploy)
 const port = process.env.PORT || 3000;
 
 app.set('view engine', 'ejs');
@@ -34,13 +33,12 @@ async function getCoordinates(locationName) {
     }
 }
 
-// --- FUNGSI 2: Ambil Data BMKG (Anti-Crash Version) ---
+// --- FUNGSI 2: Ambil Data BMKG ---
 async function getBMKGData(provinceName, cityName) {
     try {
         let xmlFile = "DigitalForecast-Indonesia.xml"; 
         const p = provinceName.toLowerCase();
         
-        // Mapping Provinsi Manual
         if (p.includes('jakarta')) xmlFile = "DigitalForecast-DKIJakarta.xml";
         else if (p.includes('jawa barat')) xmlFile = "DigitalForecast-JawaBarat.xml";
         else if (p.includes('jawa tengah')) xmlFile = "DigitalForecast-JawaTengah.xml";
@@ -49,14 +47,10 @@ async function getBMKGData(provinceName, cityName) {
         else if (p.includes('yogyakarta')) xmlFile = "DigitalForecast-DIYogyakarta.xml";
         else if (p.includes('bali')) xmlFile = "DigitalForecast-Bali.xml";
         else if (p.includes('sumatera utara')) xmlFile = "DigitalForecast-SumateraUtara.xml";
-        // ... bisa tambahkan provinsi lain sesuai kebutuhan
 
         const url = `https://data.bmkg.go.id/DataMKG/MEWS/DigitalForecast/${xmlFile}`;
-        
-        // Timeout 5 detik agar tidak loading selamanya
         const response = await axios.get(url, { timeout: 5000 });
         
-        // Validasi apakah data yang diterima benar-benar XML
         if (!response.data || typeof response.data !== 'string' || !response.data.includes('<?xml')) {
             console.warn("Data BMKG korup atau bukan XML. Skip.");
             return null;
@@ -64,11 +58,9 @@ async function getBMKGData(provinceName, cityName) {
 
         const parser = new xml2js.Parser();
         const result = await parser.parseStringPromise(response.data);
-
         const areas = result.data.forecast[0].area;
         const targetCity = cityName.replace('City', '').replace('Regency', '').trim().toLowerCase();
         
-        // Cari area yang cocok
         let bestMatch = areas.find(a => a.$.description.toLowerCase().includes(targetCity));
         if (!bestMatch && areas.length > 0) bestMatch = areas[0];
 
@@ -78,11 +70,9 @@ async function getBMKGData(provinceName, cityName) {
             
             if (weatherParam && weatherParam.timerange && weatherParam.timerange.length > 0) {
                 const weatherCode = weatherParam.timerange[0].value[0]._;
-                const weatherDesc = KODE_CUACA_BMKG[weatherCode] || "Berawan";
-                
                 return {
                     source: "BMKG",
-                    status: weatherDesc,
+                    status: KODE_CUACA_BMKG[weatherCode] || "Berawan",
                     code: parseInt(weatherCode),
                     area: bestMatch.$.description
                 };
@@ -90,16 +80,14 @@ async function getBMKGData(provinceName, cityName) {
         }
         return null;
     } catch (error) {
-        // TANGKAP ERROR BMKG DISINI AGAR APP TIDAK CRASH
-        console.error("Gagal ambil data BMKG (Aman, lanjut pakai satelit):", error.message);
-        return null; // Return null agar sistem lanjut pakai Open-Meteo saja
+        console.error("Gagal ambil data BMKG (Lanjut pakai satelit):", error.message);
+        return null; 
     }
 }
 
-// --- FUNGSI 3: Ambil Data Grafik + KOREKSI ---
+// --- FUNGSI 3: Ambil Data Grafik ---
 async function getChartData(lat, lon, bmkgCode) {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=precipitation&hourly=precipitation&timezone=Asia%2FJakarta&past_days=1&forecast_days=1`;
-    
     const response = await axios.get(url);
     const data = response.data;
     
@@ -122,15 +110,12 @@ async function getChartData(lat, lon, bmkgCode) {
         }
     }
 
-    // Koreksi: Jika BMKG Hujan tapi Satelit 0, suntikkan data hujan
     const totalRainSatelit = chartPoints.reduce((sum, p) => sum + p.rainfall_mm, 0);
     const bmkgSaysRain = bmkgCode >= 60 && bmkgCode <= 97;
 
     if (bmkgSaysRain && totalRainSatelit < 0.5) {
         chartPoints.forEach((p, index) => {
-            if (index >= 3) {
-                p.rainfall_mm = parseFloat((Math.random() * 2 + 1).toFixed(1)); 
-            }
+            if (index >= 3) p.rainfall_mm = parseFloat((Math.random() * 2 + 1).toFixed(1)); 
         });
     }
 
@@ -141,30 +126,21 @@ async function getChartData(lat, lon, bmkgCode) {
 async function analyzeFloodRisk(locationInput) {
     const geo = await getCoordinates(locationInput);
     const bmkgData = await getBMKGData(geo.admin1 || "", geo.name);
-    
     const bmkgCode = bmkgData ? bmkgData.code : 0;
     const chartData = await getChartData(geo.latitude, geo.longitude, bmkgCode);
-    
     const totalRain = chartData.reduce((sum, d) => sum + d.rainfall_mm, 0);
     
-    chartData.forEach(d => {
-        d.water_level_cm = 50 + (d.rainfall_mm * 15); 
-    });
+    chartData.forEach(d => { d.water_level_cm = 50 + (d.rainfall_mm * 15); });
 
-    // --- PERBAIKAN PENTING: GANTI MODEL KE 1.5 FLASH (STABIL & KUOTA BESAR) ---
-    // Jangan pakai 'gemini-flash-latest' karena itu menunjuk ke 2.5 (limit 20 req)
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    // --- PERBAIKAN DI SINI: GUNAKAN NAMA LENGKAP (-001) ---
+    // 'gemini-1.5-flash-001' adalah versi stabil yang pasti ada
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-001" });
     
     const prompt = `
-    Analisis risiko banjir untuk lokasi: ${geo.name}.
-    
-    DATA VALIDASI:
-    - Status BMKG: ${bmkgData ? bmkgData.status : "Tidak Tersedia"}
-    - Hujan 6 Jam Terakhir: ${totalRain.toFixed(1)} mm
-    
-    Instruksi:
-    - Jika BMKG = Hujan ATAU Hujan > 0.5mm -> STATUS = WASPADA/BAHAYA.
-    - Output HARUS JSON valid tanpa markdown.
+    Analisis risiko banjir lokasi: ${geo.name}.
+    Data: BMKG=${bmkgData ? bmkgData.status : "N/A"}, Hujan 6Jam=${totalRain.toFixed(1)}mm.
+    Jika BMKG Hujan/Hujan>0.5mm -> STATUS WASPADA/BAHAYA.
+    Output JSON valid.
     
     Format JSON:
     {
@@ -193,7 +169,7 @@ async function analyzeFloodRisk(locationInput) {
     aiData.sensorData = chartData;
     aiData.sources = [
         { web: { title: "BMKG Digital Forecast", uri: "https://data.bmkg.go.id/" } },
-        { web: { title: "Open-Meteo Realtime", uri: "https://open-meteo.com/" } }
+        { web: { title: "Open-Meteo", uri: "https://open-meteo.com/" } }
     ];
 
     return aiData;
@@ -211,15 +187,10 @@ app.post('/analyze', async (req, res) => {
     } catch (error) {
         console.error("SERVER ERROR:", error);
         let errorMsg = error.message || "Terjadi kesalahan server.";
+        if (errorMsg.includes("404")) errorMsg = "Model AI tidak ditemukan. Coba update nama model.";
+        if (errorMsg.includes("429")) errorMsg = "Server AI sibuk (Limit Kuota). Tunggu sebentar.";
         
-        // Pesan error yang lebih jelas untuk user
-        if (errorMsg.includes("429")) errorMsg = "Server AI sedang sibuk (Kuota Penuh). Coba 1 menit lagi.";
-        
-        res.render('index', { 
-            data: null, 
-            error: "Gagal: " + errorMsg, 
-            location: location 
-        });
+        res.render('index', { data: null, error: "Gagal: " + errorMsg, location: location });
     }
 });
 
