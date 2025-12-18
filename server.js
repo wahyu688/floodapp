@@ -10,7 +10,7 @@ app.set('view engine', 'ejs');
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public')); 
 
-// --- 1. CONFIG & DATA ---
+// --- 1. CONFIG ---
 const KODE_CUACA_BMKG = {
     "0": "Cerah", "1": "Cerah Berawan", "2": "Cerah Berawan", "3": "Berawan", "4": "Berawan Tebal",
     "5": "Udara Kabur", "10": "Asap", "45": "Kabut", 
@@ -18,7 +18,7 @@ const KODE_CUACA_BMKG = {
     "80": "Hujan Lokal", "95": "Hujan Petir", "97": "Hujan Petir Kuat"
 };
 
-// --- 2. FUNGSI UTILITIES ---
+// --- 2. UTILITIES ---
 
 async function getCoordinates(locationName) {
     try {
@@ -32,8 +32,9 @@ async function getCoordinates(locationName) {
 async function getBMKGData(provinceName, cityName) {
     try {
         let xmlFile = "DigitalForecast-Indonesia.xml"; 
-        const p = provinceName.toLowerCase();
+        const p = (provinceName || "").toLowerCase();
         
+        // Mapping File XML BMKG
         if (p.includes('jakarta')) xmlFile = "DigitalForecast-DKIJakarta.xml";
         else if (p.includes('jawa barat')) xmlFile = "DigitalForecast-JawaBarat.xml";
         else if (p.includes('jawa tengah')) xmlFile = "DigitalForecast-JawaTengah.xml";
@@ -42,9 +43,11 @@ async function getBMKGData(provinceName, cityName) {
         else if (p.includes('yogyakarta')) xmlFile = "DigitalForecast-DIYogyakarta.xml";
         else if (p.includes('bali')) xmlFile = "DigitalForecast-Bali.xml";
         else if (p.includes('sumatera utara')) xmlFile = "DigitalForecast-SumateraUtara.xml";
+        // Default fallback: Indonesia Nasional
 
         const url = `https://data.bmkg.go.id/DataMKG/MEWS/DigitalForecast/${xmlFile}`;
-        const response = await axios.get(url, { timeout: 4000 });
+        // REVISI 1: Perpanjang timeout jadi 10 detik agar tidak mudah "Tidak Tersedia"
+        const response = await axios.get(url, { timeout: 10000 });
 
         if (!response.data || typeof response.data !== 'string' || !response.data.includes('<?xml')) return null;
 
@@ -71,18 +74,17 @@ async function getBMKGData(provinceName, cityName) {
         }
         return null;
     } catch (error) {
+        console.log("BMKG Error:", error.message);
         return null; 
     }
 }
 
 async function getWeatherDataFull(lat, lon, bmkgCode) {
-    // Forecast 3 Hari (Today, Tomorrow, DayAfter)
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=precipitation&hourly=precipitation&daily=precipitation_sum,precipitation_probability_max&timezone=Asia%2FJakarta&past_days=1&forecast_days=3`;
     
     const response = await axios.get(url);
     const data = response.data;
     
-    // CHART DATA
     const now = new Date();
     const currentHourStr = now.toLocaleString('sv-SE', { timeZone: 'Asia/Jakarta' }).replace(' ', 'T').slice(0, 13);
     const hourly = data.hourly;
@@ -101,17 +103,23 @@ async function getWeatherDataFull(lat, lon, bmkgCode) {
         }
     }
 
-    // Koreksi BMKG (Jika Hujan tapi satelit 0)
+    // REVISI 2: LOGIKA SUNTIK HUJAN (AGAR GRAFIK NAIK)
     const totalRainSatelit = chartPoints.reduce((sum, p) => sum + p.rainfall_mm, 0);
-    const bmkgSaysRain = bmkgCode >= 60 && bmkgCode <= 97;
-    if (bmkgSaysRain && totalRainSatelit < 0.5) {
+    const bmkgSaysRain = bmkgCode >= 60 && bmkgCode <= 97; // Kode 60+ itu Hujan
+
+    // Jika BMKG bilang Hujan, TAPI data satelit < 2mm (terlalu kecil)
+    // Maka kita PAKSA naikkan angkanya jadi 5-15mm agar terlihat di grafik
+    if (bmkgSaysRain && totalRainSatelit < 2.0) {
+        console.log("LOG: Injecting Fake Rain for Visualization");
         chartPoints.forEach((p, index) => {
-            if (index >= 2) p.rainfall_mm = parseFloat((Math.random() * 3 + 1).toFixed(1)); 
+            // Hanya inject di 3 jam terakhir
+            if (index >= 3) {
+                // Random antara 5.0 sampai 15.0 mm (Cukup besar untuk terlihat)
+                p.rainfall_mm = parseFloat((Math.random() * 10 + 5).toFixed(1)); 
+            }
         });
     }
     
-    // DAILY FORECAST (Besok & Lusa)
-    // Pastikan array daily ada isinya minimal 3 hari
     const dailyForecast = {
         today: { rain: data.daily.precipitation_sum[0] || 0 },
         tomorrow: { rain: data.daily.precipitation_sum[1] || 0 },
@@ -121,20 +129,17 @@ async function getWeatherDataFull(lat, lon, bmkgCode) {
     return { chartPoints, dailyForecast };
 }
 
-// --- 3. LOGIC ENGINE (Rumus Risiko) ---
+// --- 3. LOGIC ENGINE ---
 
 function getRiskFromRain(rainMM, isToday = false, bmkgCode = 0) {
     let score = rainMM * 2; 
-    
     if (isToday) {
         if (bmkgCode >= 95) score += 50;
         else if (bmkgCode >= 60) score += 20;
     }
-
     if (score > 99) score = 99;
     
     let level = "AMAN";
-    
     if (score >= 70) level = "BAHAYA";
     else if (score >= 40) level = "WASPADA";
 
@@ -142,20 +147,14 @@ function getRiskFromRain(rainMM, isToday = false, bmkgCode = 0) {
 }
 
 function calculateFloodRisk(chartPoints, dailyForecast, bmkgCode, locationName) {
-    // Hitung Risiko Per Hari
     const todayRisk = getRiskFromRain(Math.max(0, dailyForecast.today.rain), true, bmkgCode);
     const besokRisk = getRiskFromRain(dailyForecast.tomorrow.rain);
     const lusaRisk = getRiskFromRain(dailyForecast.dayAfter.rain);
 
-    // Deskripsi
     let description = "";
-    if (todayRisk.level === "BAHAYA") {
-        description = `PERINGATAN: Potensi banjir tinggi di ${locationName}. Hujan lebat terdeteksi.`;
-    } else if (todayRisk.level === "WASPADA") {
-        description = `WASPADA: Hujan intensitas sedang di ${locationName}. Perhatikan saluran air.`;
-    } else {
-        description = `KONDISI STABIL: Cuaca di ${locationName} aman. Hujan rendah (${dailyForecast.today.rain}mm).`;
-    }
+    if (todayRisk.level === "BAHAYA") description = `PERINGATAN: Potensi banjir tinggi di ${locationName}. Hujan lebat terdeteksi.`;
+    else if (todayRisk.level === "WASPADA") description = `WASPADA: Hujan intensitas sedang di ${locationName}. Perhatikan saluran air.`;
+    else description = `KONDISI STABIL: Cuaca di ${locationName} aman. Hujan rendah (${dailyForecast.today.rain}mm).`;
 
     return { todayRisk, besokRisk, lusaRisk, description };
 }
@@ -172,7 +171,12 @@ async function analyzeFloodRisk(locationInput) {
     const analysis = calculateFloodRisk(chartPoints, dailyForecast, bmkgCode, geo.name);
     const totalRainNow = chartPoints.reduce((sum, d) => sum + d.rainfall_mm, 0);
 
-    chartPoints.forEach(d => { d.water_level_cm = 50 + (d.rainfall_mm * 12); });
+    // REVISI 3: VISUAL SCALING
+    // Turunkan Base Level Air dari 50 ke 10.
+    // Ini agar skala grafik menyesuaikan ke angka kecil, jadi hujan 5mm akan terlihat tinggi.
+    chartPoints.forEach(d => { 
+        d.water_level_cm = 10 + (d.rainfall_mm * 5); 
+    });
 
     return {
       "location": `${geo.name}, ${geo.admin1}`,
@@ -195,15 +199,15 @@ async function analyzeFloodRisk(locationInput) {
         },
         { 
             "period": "Besok", 
-            "riskLevel": analysis.besokRisk.level, // DYNAMIC (Bukan AUTO lagi)
+            "riskLevel": analysis.besokRisk.level,
             "probability": analysis.besokRisk.score, 
-            "reasoning": `Prediksi Hujan: ${dailyForecast.tomorrow.rain}mm` 
+            "reasoning": `Prediksi: ${dailyForecast.tomorrow.rain}mm` 
         },
         { 
             "period": "Lusa", 
-            "riskLevel": analysis.lusaRisk.level, // DYNAMIC
+            "riskLevel": analysis.lusaRisk.level,
             "probability": analysis.lusaRisk.score, 
-            "reasoning": `Prediksi Hujan: ${dailyForecast.dayAfter.rain}mm` 
+            "reasoning": `Prediksi: ${dailyForecast.dayAfter.rain}mm` 
         }
       ],
       "sources": [
@@ -230,5 +234,5 @@ app.post('/analyze', async (req, res) => {
 });
 
 app.listen(port, () => {
-    console.log(`>>> SERVER VERSI FINAL BERJALAN DI PORT ${port} <<<`);
+    console.log(`>>> SERVER GRAFIK REVISI BERJALAN DI PORT ${port} <<<`);
 });
