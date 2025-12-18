@@ -1,6 +1,6 @@
 const express = require('express');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const axios = require('axios'); // Library untuk request ke Open-Meteo
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
@@ -10,9 +10,16 @@ app.set('view engine', 'ejs');
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public')); 
 
+// Setup Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// --- FUNGSI 1: Cari Koordinat dari Nama Kota (Geocoding) ---
+// --- HELPER: Format Waktu ---
+function formatTime(isoString) {
+    const date = new Date(isoString);
+    return date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+}
+
+// --- FUNGSI 1: Cari Koordinat ---
 async function getCoordinates(locationName) {
     try {
         const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(locationName)}&count=1&language=id&format=json`;
@@ -26,7 +33,7 @@ async function getCoordinates(locationName) {
             lat: response.data.results[0].latitude,
             lon: response.data.results[0].longitude,
             name: response.data.results[0].name,
-            admin1: response.data.results[0].admin1 // Provinsi/Wilayah
+            admin1: response.data.results[0].admin1
         };
     } catch (error) {
         console.error("Geocoding Error:", error.message);
@@ -34,11 +41,11 @@ async function getCoordinates(locationName) {
     }
 }
 
-// --- FUNGSI 2: Ambil Data Cuaca Real-time (Open-Meteo) ---
+// --- FUNGSI 2: Ambil Data Cuaca Detail (Per Jam) ---
 async function getRealWeatherData(lat, lon) {
     try {
-        // Mengambil data curah hujan (precipitation), hujan (rain), dan tutupan awan
-        const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=precipitation,rain,cloud_cover&hourly=precipitation_probability,rain&daily=precipitation_sum,precipitation_probability_max&timezone=auto&past_days=1`;
+        // Minta data hourly untuk 1 hari terakhir agar kita bisa ambil 6 jam ke belakang
+        const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=precipitation,cloud_cover&hourly=precipitation,soil_moisture_0_to_1cm&daily=precipitation_sum,precipitation_probability_max&timezone=auto&past_days=1&forecast_days=1`;
         
         const response = await axios.get(url);
         return response.data;
@@ -48,67 +55,105 @@ async function getRealWeatherData(lat, lon) {
     }
 }
 
-// --- FUNGSI 3: Analisis AI berdasarkan Data Fakta ---
+// --- FUNGSI 3: Analisis AI + Data Processing ---
 async function analyzeFloodRisk(locationInput) {
-    // 1. Dapatkan Data Fakta dulu
+    // 1. Dapatkan Data Mentah dari Open-Meteo
     const geo = await getCoordinates(locationInput);
     const weather = await getRealWeatherData(geo.lat, geo.lon);
 
-    // Siapkan data fakta untuk disuapi ke AI
-    const factData = {
-        location: `${geo.name}, ${geo.admin1 || ''}`,
-        current_rain_mm: weather.current.precipitation, // Hujan saat ini
-        cloud_cover: weather.current.cloud_cover, // Berawan %
-        rain_today_mm: weather.daily.precipitation_sum[1], // Total hujan hari ini (estimasi)
-        rain_yesterday_mm: weather.daily.precipitation_sum[0], // Hujan kemarin (penting untuk saturasi tanah)
-        rain_prob_max: weather.daily.precipitation_probability_max[1] // Peluang hujan tertinggi hari ini
-    };
+    // 2. PROSES DATA GRAFIK (INI BAGIAN KRUSIAL AGAR TIDAK ASAL)
+    // Kita cari indeks jam sekarang di array 'hourly'
+    const now = new Date();
+    // Format waktu Open-Meteo: "2023-12-18T14:00"
+    // Kita cari string jam yang paling mendekati jam sekarang
+    const currentHourStr = now.toISOString().slice(0, 13); // Ambil sampai jam (YYYY-MM-DDTHH)
+    
+    // Cari index di mana waktunya mirip dengan jam sekarang
+    // Karena timezone auto, kita cari manual berdasarkan jam lokal server/klien logic
+    // Cara gampang: Ambil array dari belakang (karena past_days=1 + forecast=1)
+    // Array hourly biasanya panjangnya 48 (24 jam kemarin + 24 jam hari ini)
+    // Kita asumsikan "current" time di API adalah patokan.
+    
+    // LOGIKA MANUAL: Ambil 6 data terakhir yang BUKAN prediksi masa depan
+    // Kita filter data yang waktunya <= waktu sekarang
+    const validTimes = [];
+    const validRain = [];
+    
+    const hourlyTimes = weather.hourly.time;
+    const hourlyRain = weather.hourly.precipitation;
+    
+    // Cari index jam saat ini
+    let currentIndex = 0;
+    const currentIsoFull = weather.current.time; // Waktu server meteo saat ini
+    
+    // Loop untuk mencari posisi index jam sekarang
+    for(let i=0; i < hourlyTimes.length; i++) {
+        if (hourlyTimes[i] >= currentIsoFull) {
+            currentIndex = i;
+            break;
+        }
+    }
+    
+    // Jika tidak ketemu (misal jam 23:59), ambil index terakhir
+    if (currentIndex === 0 && hourlyTimes.length > 0) currentIndex = hourlyTimes.length - 1;
 
-    console.log("Data Fakta Open-Meteo:", factData); // Debugging di terminal
+    // Ambil 6 poin ke belakang (T-5, T-4, T-3, T-2, T-1, Sekarang)
+    const chartData = [];
+    for (let i = 5; i >= 0; i--) {
+        const idx = currentIndex - i;
+        if (idx >= 0) {
+            chartData.push({
+                timestamp: formatTime(hourlyTimes[idx]), // Jam:Misal 14:00
+                rainfall_mm: hourlyRain[idx], // INI ANGKA ASLI
+                water_level_cm: 0 // Nanti diisi logika estimasi
+            });
+        }
+    }
 
+    // Hitung rata-rata hujan 6 jam terakhir untuk estimasi tinggi air
+    const totalRain6h = chartData.reduce((sum, item) => sum + item.rainfall_mm, 0);
+    
+    // LOGIKA ESTIMASI TINGGI AIR (Karena tidak ada sensor IoT)
+    // Kita buat simulasi: Base level 50cm. Setiap 1mm hujan menambah 2cm air (misal).
+    chartData.forEach(d => {
+        let baseLevel = 50; 
+        if (totalRain6h > 10) baseLevel = 100; // Jika hujan deras, air naik
+        if (totalRain6h > 50) baseLevel = 200; // Banjir
+        
+        // Variasi sedikit agar grafik air tidak datar
+        d.water_level_cm = baseLevel + (d.rainfall_mm * 5); 
+    });
+
+    // 3. Masukkan ke AI (Hanya untuk analisis teks, bukan grafik)
     const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
 
     const prompt = `
-    Bertindaklah sebagai ahli hidrologi. Saya memberikan DATA CUACA ASLI & FAKTUAL dari sensor Open-Meteo untuk wilayah "${factData.location}".
+    Lokasi: ${geo.name}, ${geo.admin1}.
+    Data 6 Jam Terakhir (FAKTA):
+    ${chartData.map(d => `- Jam ${d.timestamp}: Hujan ${d.rainfall_mm}mm`).join('\n')}
     
-    DATA FAKTA (JANGAN DIUBAH, GUNAKAN INI UNTUK ANALISIS):
-    - Curah Hujan SAAT INI (Realtime): ${factData.current_rain_mm} mm
-    - Total Hujan KEMARIN: ${factData.rain_yesterday_mm} mm (Jika tinggi, tanah mungkin jenuh air)
-    - Estimasi Total Hujan HARI INI: ${factData.rain_today_mm} mm
-    - Persentase Tutupan Awan: ${factData.cloud_cover}%
+    Kondisi Langit Sekarang: ${weather.current.cloud_cover}% Berawan.
+    Total Hujan Hari Ini: ${weather.daily.precipitation_sum[1]}mm.
     
     Tugas:
-    Analisis risiko banjir berdasarkan angka-angka di atas. 
-    Jika curah hujan saat ini 0 mm dan kemarin rendah, maka risiko kemungkinan AMAN.
-    Jika curah hujan tinggi (>20mm) atau kemarin hujan deras, risiko naik.
+    Analisis risiko banjir berdasarkan data di atas.
+    Jika hujan 0mm dalam 6 jam terakhir, status AMAN.
+    Jika hujan terus menerus atau ada lonjakan mm, status WASPADA/BAHAYA.
     
-    Format JSON Wajib:
+    Format JSON:
     {
-      "location": "${factData.location}",
+      "location": "${geo.name}, ${geo.admin1}",
       "riskLevel": "AMAN" | "WASPADA" | "BAHAYA",
       "probability": number (0-100),
-      "description": "Jelaskan kondisi berdasarkan data curah hujan di atas.",
-      "factors": { 
-          "rainfall": "Sebutkan data mm hujan dari data di atas", 
-          "drainage": "Asumsi kondisi drainase umum kota tersebut", 
-          "history": "Analisis singkat topografi wilayah ini" 
-      },
-      "recommendation": "Saran spesifik.",
-      "sensorData": [
-        { "timestamp": "Kemarin", "rainfall_mm": ${factData.rain_yesterday_mm}, "water_level_cm": 0 },
-        { "timestamp": "Hari Ini (Total)", "rainfall_mm": ${factData.rain_today_mm}, "water_level_cm": 0 },
-        { "timestamp": "Saat Ini", "rainfall_mm": ${factData.current_rain_mm}, "water_level_cm": 0 }
-      ],
+      "description": "Narasi kondisi cuaca real-time.",
+      "factors": { "rainfall": "Ringkasan hujan...", "drainage": "...", "history": "..." },
+      "recommendation": "...",
       "forecasts": [
-        { "period": "Hari Ini", "riskLevel": "AUTO", "probability": ${factData.rain_prob_max}, "reasoning": "Berdasarkan probabilitas hujan Open-Meteo." },
-        { "period": "3 Hari", "riskLevel": "AUTO", "probability": 0, "reasoning": "Prediksi AI." },
-        { "period": "Musiman", "riskLevel": "AUTO", "probability": 0, "reasoning": "Tren tahunan." }
+        { "period": "Hari Ini", "riskLevel": "AUTO", "probability": ${weather.daily.precipitation_probability_max[1]}, "reasoning": "Data Open-Meteo" },
+        { "period": "Besok", "riskLevel": "AUTO", "probability": 0, "reasoning": "Prediksi AI" },
+        { "period": "Lusa", "riskLevel": "AUTO", "probability": 0, "reasoning": "Prediksi AI" }
       ]
     }
-    
-    Catatan: Karena tidak ada sensor sungai IoT fisik, isi 'water_level_cm' dengan estimasi logis:
-    - Jika hujan 0mm, water_level_cm rendah (misal 50-100).
-    - Jika hujan deras, water_level_cm naik (misal 150-300).
     `;
 
     try {
@@ -119,20 +164,20 @@ async function analyzeFloodRisk(locationInput) {
         text = text.replace(/```json/g, '').replace(/```/g, '').trim();
         const jsonStart = text.indexOf('{');
         const jsonEnd = text.lastIndexOf('}') + 1;
+        const aiData = JSON.parse(text.substring(jsonStart, jsonEnd));
         
-        if (jsonStart === -1) throw new Error("Format JSON AI rusak");
-        
-        const data = JSON.parse(text.substring(jsonStart, jsonEnd));
-        data.sources = [{ web: { title: "Open-Meteo Realtime API", uri: "https://open-meteo.com/" } }];
+        // 4. OVERRIDE SENSOR DATA (PENTING!)
+        // Kita buang data sensor karangan AI, ganti dengan data ASLI yang kita hitung di atas
+        aiData.sensorData = chartData;
+        aiData.sources = [{ web: { title: "Open-Meteo Hourly API", uri: "https://open-meteo.com/" } }];
 
-        return data;
+        return aiData;
     } catch (error) {
-        console.error("Error AI Processing:", error);
+        console.error("Error AI:", error);
         throw error;
     }
 }
 
-// Routes
 app.get('/', (req, res) => {
     res.render('index', { data: null, error: null, location: '' });
 });
@@ -143,15 +188,9 @@ app.post('/analyze', async (req, res) => {
         const data = await analyzeFloodRisk(location);
         res.render('index', { data: data, error: null, location: location });
     } catch (error) {
-        console.error(error);
-        let msg = "Gagal mengambil data. Pastikan nama kota benar.";
-        if (error.response && error.response.status === 429) msg = "Terlalu banyak request ke AI. Tunggu sebentar.";
-        
-        res.render('index', { 
-            data: null, 
-            error: msg, 
-            location: location 
-        });
+        let msg = "Gagal mengambil data.";
+        if (error.response && error.response.status === 429) msg = "Terlalu banyak request (AI Quota). Tunggu sebentar.";
+        res.render('index', { data: null, error: msg, location: location });
     }
 });
 
